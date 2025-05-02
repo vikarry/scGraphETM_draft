@@ -10,6 +10,7 @@ def filter_and_find_degs(rna_files_dir, output_dir='./results/degs', min_cells=1
                          n_top_genes=2000, pval_cutoff=0.05, logfc_cutoff=0.5):
     """
     Load RNA h5ad files, filter cells and genes, normalize, find DEGs, and save results.
+    Also saves a version of the data with only DEGs without scaling or normalization.
 
     Parameters:
     -----------
@@ -54,12 +55,15 @@ def filter_and_find_degs(rna_files_dir, output_dir='./results/degs', min_cells=1
 
     # Load and merge data
     adatas = []
+    original_adatas = {}  # Store the original data before processing
 
     # Load healthy samples
     for h_file in healthy_files:
         file_path = os.path.join(rna_files_dir, h_file)
         print(f"Loading healthy sample: {h_file}")
         adata = sc.read_h5ad(file_path)
+        print(adata)
+        original_adatas[h_file] = adata.copy()  # Store original
         adata.obs['sample_type'] = 'healthy'
         adata.obs['sample_id'] = h_file.split('_')[0]  # Extract GSM ID
         adatas.append(adata)
@@ -69,6 +73,7 @@ def filter_and_find_degs(rna_files_dir, output_dir='./results/degs', min_cells=1
         file_path = os.path.join(rna_files_dir, c_file)
         print(f"Loading CLL sample: {c_file}")
         adata = sc.read_h5ad(file_path)
+        original_adatas[c_file] = adata.copy()  # Store original
         adata.obs['sample_type'] = 'cll'
         adata.obs['sample_id'] = c_file.split('_')[0]  # Extract GSM ID
         adatas.append(adata)
@@ -124,8 +129,11 @@ def filter_and_find_degs(rna_files_dir, output_dir='./results/degs', min_cells=1
 
     print(f"After filtering: {adata.shape[0]} cells, {adata.shape[1]} genes")
 
-    # Normalize data
-    print("Normalizing data...")
+    # Create a copy of the filtered but unnormalized data
+    unnormalized_adata = adata.copy()
+
+    # Normalize data for DEG analysis
+    print("Normalizing data for DEG analysis...")
     sc.pp.normalize_total(adata, target_sum=1e4)
     sc.pp.log1p(adata)
 
@@ -247,6 +255,26 @@ def filter_and_find_degs(rna_files_dir, output_dir='./results/degs', min_cells=1
         plt.close()
 
     print(f"Identified {len(sig_deg_df)} significant DEGs (p-adj < {pval_cutoff}, |logFC| > {logfc_cutoff})")
+
+    # Save AnnData objects with only significant DEGs (unnormalized)
+    significant_genes = set(sig_deg_df['gene'].unique())
+    print(f"Saving AnnData objects with only significant DEGs (unnormalized)...")
+
+    # For each original file, save a version with only DEGs
+    for file_name, orig_adata in original_adatas.items():
+        # Filter to keep only significant DEGs
+        mask = [gene in significant_genes for gene in orig_adata.var_names]
+        if sum(mask) > 0:  # Only save if there are DEGs present
+            # Subset the original unnormalized data to keep only DEGs
+            deg_adata = orig_adata[:, mask].copy()
+
+            # Name the output file
+            output_file = os.path.join(output_dir, file_name.replace('.h5ad', '_degs.h5ad'))
+
+            # Save the DEG-only data (unnormalized)
+            deg_adata.write_h5ad(output_file)
+            print(f"Saved {sum(mask)} DEGs for {file_name} to {output_file}")
+
     print(f"Results saved to {output_dir}")
 
     return adata, sig_deg_df
@@ -256,19 +284,19 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='Find differentially expressed genes between healthy and CLL samples')
-    parser.add_argument('--data_dir', default='./data/processed',
+    parser.add_argument('--data_dir', default='../data/processed',
                         help='Directory containing processed h5ad files')
-    parser.add_argument('--output_dir', default='./results/degs',
+    parser.add_argument('--output_dir', default='../data/processed',
                         help='Directory to save DEG results')
-    parser.add_argument('--min_cells', type=int, default=10,
+    parser.add_argument('--min_cells', type=int, default=3,
                         help='Minimum number of cells for a gene to be kept')
     parser.add_argument('--min_genes', type=int, default=200,
                         help='Minimum number of genes for a cell to be kept')
-    parser.add_argument('--n_top_genes', type=int, default=2000,
+    parser.add_argument('--n_top_genes', type=int, default=3000,
                         help='Number of highly variable genes to select')
-    parser.add_argument('--pval_cutoff', type=float, default=0.05,
+    parser.add_argument('--pval_cutoff', type=float, default=0.15,
                         help='P-value cutoff for DEG significance')
-    parser.add_argument('--logfc_cutoff', type=float, default=0.5,
+    parser.add_argument('--logfc_cutoff', type=float, default=0.2,
                         help='Log fold change cutoff for DEG significance')
 
     args = parser.parse_args()

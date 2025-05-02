@@ -7,7 +7,8 @@ import scipy.io
 from scipy.sparse import csr_matrix
 
 
-def convert_rna_to_h5ad(features_file, barcodes_file, matrix_file, output_file):
+def convert_rna_to_h5ad(features_file, barcodes_file, matrix_file, output_file,
+                        gene_pos_file=None, name2id_file=None):
     """
     Convert RNA-seq data files (features, barcodes, matrix) to h5ad format.
 
@@ -21,6 +22,10 @@ def convert_rna_to_h5ad(features_file, barcodes_file, matrix_file, output_file):
         Path to the matrix file (.mtx.gz)
     output_file : str
         Path to save the output h5ad file
+    gene_pos_file : str, optional
+        Path to gene positions CSV file containing chromosome and TSS info
+    name2id_file : str, optional
+        Path to gene name to Ensembl ID mapping CSV file
     """
     print("Reading features...")
     # Read features file
@@ -61,7 +66,84 @@ def convert_rna_to_h5ad(features_file, barcodes_file, matrix_file, output_file):
     adata.var_names = features_df['gene_id']
     adata.var.index = adata.var_names
 
-    print(f"Created AnnData object with {adata.n_obs} cells and {adata.n_vars} genes")
+    # Process additional gene information if provided
+    if gene_pos_file and os.path.exists(gene_pos_file):
+        print(f"Adding gene position information from {gene_pos_file}...")
+        gene_pos_df = pd.read_csv(gene_pos_file)
+
+        # Ensure column names are standardized
+        if 'ensembl_gene_id' in gene_pos_df.columns:
+            gene_pos_df.set_index('ensembl_gene_id', inplace=True)
+        elif 'gene_id' in gene_pos_df.columns:
+            gene_pos_df.set_index('gene_id', inplace=True)
+
+        # Standardize chromosome column names
+        if 'chromosome_name' in gene_pos_df.columns:
+            # Prepend 'chr' to chromosome names if not already present
+            if not gene_pos_df['chromosome_name'].str.startswith('chr').all():
+                gene_pos_df['chrom'] = 'chr' + gene_pos_df['chromosome_name'].astype(str)
+            else:
+                gene_pos_df['chrom'] = gene_pos_df['chromosome_name']
+
+        # Standardize position column names
+        position_mapping = {
+            'start_position': 'chromStart',
+            'end_position': 'chromEnd',
+            'transcription_start_site': 'tss'
+        }
+
+        for old_col, new_col in position_mapping.items():
+            if old_col in gene_pos_df.columns:
+                gene_pos_df[new_col] = gene_pos_df[old_col]
+
+        # Add TSS if not present but start_position is available
+        if 'tss' not in gene_pos_df.columns and 'chromStart' in gene_pos_df.columns:
+            gene_pos_df['tss'] = gene_pos_df['chromStart']
+
+        # Join gene position data to adata.var
+        adata.var = adata.var.join(gene_pos_df, how='left')
+
+    # Process name to ID mapping if provided
+    if name2id_file and os.path.exists(name2id_file):
+        print(f"Adding gene name to ID mapping from {name2id_file}...")
+        name2id_df = pd.read_csv(name2id_file)
+
+        # Ensure column names are standardized
+        if all(col in name2id_df.columns for col in ['gene_id', 'gene_name']):
+            name2id_df.set_index('gene_id', inplace=True)
+
+            # Fill in missing gene names if possible
+            missing_names = adata.var['gene_name'].isna()
+            if missing_names.any():
+                for idx in adata.var.index[missing_names]:
+                    if idx in name2id_df.index:
+                        adata.var.at[idx, 'gene_name'] = name2id_df.at[idx, 'gene_name']
+
+            # Add any additional columns from name2id mapping
+            for col in name2id_df.columns:
+                if col not in adata.var.columns:
+                    adata.var = adata.var.join(name2id_df[[col]], how='left')
+
+    # Filter for chromosomes 1-22, X, Y
+    if 'chrom' in adata.var.columns:
+        print("Filtering for chromosomes 1-22, X, Y...")
+        valid_chroms = [f'chr{i}' for i in range(1, 23)] + ['chrX', 'chrY']
+
+        # Handle chromosome naming with or without 'chr' prefix
+        if not any(adata.var['chrom'].str.startswith('chr')):
+            valid_chroms = [c.replace('chr', '') for c in valid_chroms]
+
+        # Count before filtering
+        before_count = adata.shape[1]
+
+        # Filter the AnnData object
+        adata = adata[:, adata.var['chrom'].isin(valid_chroms)].copy()
+
+        # Count after filtering
+        after_count = adata.shape[1]
+        print(f"Filtered from {before_count} to {after_count} genes based on chromosome")
+
+    print(f"Final AnnData object has {adata.n_obs} cells and {adata.n_vars} genes")
 
     # Save as h5ad
     print(f"Saving to {output_file}...")
@@ -116,6 +198,34 @@ def convert_atac_to_h5ad(barcodes_file, matrix_file, peaks_file, output_file):
         lambda row: f"{row['chrom']}:{row['chromStart']}-{row['chromEnd']}", axis=1
     )
 
+    # Filter for chromosomes 1-22, X, Y
+    print("Filtering for chromosomes 1-22, X, Y...")
+    valid_chroms = [f'chr{i}' for i in range(1, 23)] + ['chrX', 'chrY']
+
+    # Handle chromosome naming with or without 'chr' prefix
+    if not any(peaks_df['chrom'].str.startswith('chr')):
+        valid_chroms = [c.replace('chr', '') for c in valid_chroms]
+
+    # Count before filtering
+    before_count = len(peaks_df)
+
+    # Filter peaks
+    peaks_df = peaks_df[peaks_df['chrom'].isin(valid_chroms)]
+
+    # Count after filtering
+    after_count = len(peaks_df)
+    print(f"Filtered from {before_count} to {after_count} peaks based on chromosome")
+
+    # Need to filter the sparse matrix to match the filtered peaks
+    # First, create a mask of which peaks to keep
+    keep_indices = np.where(peaks_df.index.isin(range(before_count)))[0]
+
+    # Filter the sparse matrix to only include the valid chromosomes
+    if sparse_matrix.shape[0] == before_count:  # If peaks are rows
+        sparse_matrix = sparse_matrix[keep_indices, :]
+    else:  # If peaks are columns
+        sparse_matrix = sparse_matrix[:, keep_indices]
+
     # Create AnnData object
     # Note: The matrix from the mtx file is usually features x cells,
     # but AnnData expects cells x features, so we transpose it
@@ -130,7 +240,7 @@ def convert_atac_to_h5ad(barcodes_file, matrix_file, peaks_file, output_file):
     adata.var_names = peaks_df['region_index']
     adata.var.index = adata.var_names
 
-    print(f"Created AnnData object with {adata.n_obs} cells and {adata.n_vars} peaks")
+    print(f"Final AnnData object has {adata.n_obs} cells and {adata.n_vars} peaks")
 
     # Save as h5ad
     print(f"Saving to {output_file}...")
@@ -140,7 +250,8 @@ def convert_atac_to_h5ad(barcodes_file, matrix_file, peaks_file, output_file):
     return adata
 
 
-def process_data_directory(data_dir="./data", output_dir="./data/processed"):
+def process_data_directory(data_dir="./data", output_dir="./data/processed",
+                           gene_pos_file=None, name2id_file=None):
     """
     Process all RNA-seq and ATAC-seq data files in the data directory.
 
@@ -150,6 +261,10 @@ def process_data_directory(data_dir="./data", output_dir="./data/processed"):
         Path to the directory containing the data files
     output_dir : str
         Path to the directory to save the processed files
+    gene_pos_file : str, optional
+        Path to gene positions CSV file containing chromosome and TSS info
+    name2id_file : str, optional
+        Path to gene name to Ensembl ID mapping CSV file
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -204,7 +319,8 @@ def process_data_directory(data_dir="./data", output_dir="./data/processed"):
         if rna_features and rna_barcodes and rna_matrix:
             rna_output = os.path.join(output_dir, f"{prefix}_rna.h5ad")
             print(f"Converting RNA-seq files to {rna_output}...")
-            convert_rna_to_h5ad(rna_features, rna_barcodes, rna_matrix, rna_output)
+            convert_rna_to_h5ad(rna_features, rna_barcodes, rna_matrix, rna_output,
+                                gene_pos_file, name2id_file)
 
         # Process ATAC-seq files if all are found
         if atac_barcodes and atac_matrix and atac_peaks:
@@ -219,6 +335,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert RNA-seq or ATAC-seq data to h5ad format')
     parser.add_argument('--data_dir', default='./data', help='Directory containing the data files')
     parser.add_argument('--output_dir', default='./data/processed', help='Directory to save the processed files')
+    parser.add_argument('--gene_pos_file', default=None,
+                        help='Path to gene positions CSV file (all_gene_chrom_positions.csv)')
+    parser.add_argument('--name2id_file', default=None,
+                        help='Path to gene name to Ensembl ID mapping CSV file (name2id.csv)')
 
     # Individual file processing
     parser.add_argument('--mode', choices=['rna', 'atac', 'auto'], default='auto',
@@ -236,11 +356,13 @@ if __name__ == "__main__":
         if args.mode == 'rna' or (args.mode == 'auto' and args.features):
             if not args.output:
                 args.output = os.path.join(args.output_dir, 'rna.h5ad')
-            convert_rna_to_h5ad(args.features, args.barcodes, args.matrix, args.output)
+            convert_rna_to_h5ad(args.features, args.barcodes, args.matrix, args.output,
+                                args.gene_pos_file, args.name2id_file)
         elif args.mode == 'atac' or (args.mode == 'auto' and args.peaks):
             if not args.output:
                 args.output = os.path.join(args.output_dir, 'atac.h5ad')
             convert_atac_to_h5ad(args.barcodes, args.matrix, args.peaks, args.output)
     else:
         # Otherwise, process all files in the data directory
-        process_data_directory(args.data_dir, args.output_dir)
+        process_data_directory(args.data_dir, args.output_dir, args.gene_pos_file, args.name2id_file)
+        
