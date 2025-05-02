@@ -57,8 +57,9 @@ def impute(model: ScModel, data_loader, impute_plot_path: Optional[str] = None) 
             rho, eta = None, None
 
             # GNN processing if enabled
-            if model.use_gnn:
-                edge_index = data_loader.train_loader.dataset.dataset.edge_index.to(model.device)
+            if model.use_gnn and model.edge_index is not None:
+                # Use the model's edge_index directly
+                edge_index = model.edge_index
 
                 if model.use_xtrimo:
                     gene_embeddings = model.gene_embedding(RNA_tensor)
@@ -103,14 +104,14 @@ def impute(model: ScModel, data_loader, impute_plot_path: Optional[str] = None) 
         spearman_corrs = []
 
         print(f"\nCalculating correlations for {modality}...")
-        for j in tqdm(range(orig.shape[0])):
+        for j in tqdm(range(orig.shape[1])):
             # Skip features with all zeros
             if np.all(orig[:, j] == 0) or np.all(imp[:, j] == 0):
                 continue
 
             # Calculate correlations
-            pear_corr, _ = pearsonr(orig[j, :], imp[j, :])
-            spear_corr, _ = spearmanr(orig[j, :], imp[j, :])
+            pear_corr, _ = pearsonr(orig[:, j], imp[:, j])
+            spear_corr, _ = spearmanr(orig[:, j], imp[:, j])
 
             if not np.isnan(pear_corr):
                 pearson_corrs.append(pear_corr)
@@ -183,7 +184,7 @@ def _plot_imputation_results(rna_original: np.ndarray, rna_imputed: np.ndarray,
         correlations = []
         for j in range(orig.shape[1]):
             if not np.all(orig[:, j] == 0) and not np.all(imp[:, j] == 0):
-                corr = pearsonr(orig[j, :], imp[j, :])
+                corr, _ = pearsonr(orig[:, j], imp[:, j])
                 if not np.isnan(corr):
                     correlations.append(corr)
 

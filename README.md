@@ -35,3 +35,39 @@ Calculates the overlap percentage between available CisTarget region and peaks. 
 - **TF-RE Connectivity Matrices**: Sparse matrices representing significant interactions between genes and peaks.
 - **GRN Matrix**: A merged representation of TG-RE and TF-RE matrices for the overall gene regulatory network.
 
+## Project Structure
+
+├── data/
+│   ├── processed/
+│   │   ├── cll_atac.h5ad
+│   │   ├── cll_rna.h5ad
+│   │   ├── healthy_atac.h5ad
+│   │   └── healthy_rna.h5ad
+│   ├── GSM4829410_healthy_atac_filtered_barcodes.tsv.gz
+│   ├── GSM4829410_healthy_atac_filtered_matrix.mtx.gz
+│   ├── GSM4829410_healthy_atac_peaks.bed.gz
+│   ├── GSM4829411_healthy_rna_features.tsv.gz
+│   ├── GSM4829411_healthy_rna_filtered_barcodes.tsv.gz
+│   ├── GSM4829411_healthy_rna_filtered_matrix.mtx.gz
+│   ├── GSM4829412_cll_atac_filtered_barcodes.tsv.gz
+│   ├── GSM4829412_cll_atac_filtered_matrix.mtx.gz
+│   ├── GSM4829412_cll_atac_peaks.bed.gz
+│   ├── GSM4829413_cll_rna_features.tsv.gz
+│   ├── GSM4829413_cll_rna_filtered_barcodes.tsv.gz
+│   └── GSM4829413_cll_rna_filtered_matrix.mtx.gz
+├── preprocess/
+│   ├── convert_raw_to_h5ad.py      # Convert raw files to h5ad format
+│   ├── differential_grn_preprocess.py  # Preprocess for differential GRN analysis
+│   ├── filter_deg.py               # Filter differentially expressed genes
+│   ├── process_cistarget_tf_re.py  # Process TF-RE connections using CisTarget
+│   └── process_tg_re.py            # Process TG-RE connections
+├── evaluation.py                    # Model evaluation functions
+├── imputation.py                    # Imputation of missing data
+├── main.py                          # Main script to run the model
+├── model.py                         # Model definition
+├── modules.py                       # Neural network modules
+├── scDataloader.py                  # Data loader for single-cell data
+├── script.sh                        # Example shell script for running pipeline
+├── tester.py                        # Testing functions
+├── train.py                         # Training functions
+└── train_node2vec.py                # Script to train node2vec embeddings

@@ -51,7 +51,9 @@ class ScModel(nn.Module):
                  lr: float = 0.001, best_model_path: Optional[str] = None,
                  use_graph_recon: bool = False, graph_recon_weight: float = 1.0,
                  pos_weight: float = 1.0, node2vec: Optional[torch.Tensor] = None,
-                 latent_size: int = 100, use_gnn: bool = True, use_xtrimo: bool = False, shared_decoder: bool = False):
+                 edge_index: Optional[torch.Tensor] = None,
+                 latent_size: int = 100, use_gnn: bool = True, use_xtrimo: bool = False,
+                 shared_decoder: bool = False):
         super().__init__()
         self.device = device
         self.use_graph_recon = use_graph_recon
@@ -61,33 +63,27 @@ class ScModel(nn.Module):
         self.shared_decoder = shared_decoder
         self.emb_size = emb_size
 
-        # Initialize VAEs
+        self.edge_index = edge_index.to(device) if edge_index is not None else None
         self.vae_rna = VAE(num_of_gene, emb_size, num_of_topic).to(device)
         self.vae_atac = VAE(num_of_peak, emb_size, num_of_topic).to(device)
 
-        # Initialize GNN if needed
         self.gnn = GNN(emb_size, emb_size * 2, emb_size).to(device) if use_gnn else None
 
-        # Initialize decoders with shared parameters if requested
         if shared_decoder:
-            # Create shared alpha transformation
             shared_alphas = nn.Sequential(
                 nn.Linear(emb_size, num_of_topic, bias=False),
                 nn.LeakyReLU(),
                 nn.Dropout(p=0.1),
             ).to(device)
 
-            # Create decoders with shared alphas
             self.decoder_rna = LDEC(num_of_gene, emb_size, num_of_topic, batch_size,
                                     shared_module=shared_alphas).to(device)
             self.decoder_atac = LDEC(num_of_peak, emb_size, num_of_topic, batch_size,
                                      shared_module=shared_alphas).to(device)
         else:
-            # Create independent decoders
             self.decoder_rna = LDEC(num_of_gene, emb_size, num_of_topic, batch_size).to(device)
             self.decoder_atac = LDEC(num_of_peak, emb_size, num_of_topic, batch_size).to(device)
 
-        # Store all models in ModuleList for consistency
         self.models = nn.ModuleList([
             self.vae_rna,
             self.vae_atac,
@@ -207,7 +203,6 @@ class ScModel(nn.Module):
         # Combine positive and negative logits
         logits = torch.cat([pos_logits, neg_logits])  # Shape: (2*num_pos_edges,)
 
-        # Create labels (1 for positive edges, 0 for negative edges)
         labels = torch.zeros(2 * num_pos_edges, dtype=torch.float32, device=self.device)
         labels[:num_pos_edges] = 1.0
 
@@ -222,7 +217,7 @@ class ScModel(nn.Module):
 
         return loss
 
-    def forward(self, batch: List[torch.Tensor], train_loader: torch.utils.data.DataLoader) -> Tuple[torch.Tensor, ...]:
+    def forward(self, batch: List[torch.Tensor]) -> Tuple[torch.Tensor, ...]:
         batch = [tensor.to(self.device) if isinstance(tensor, torch.Tensor)
                  else tensor for tensor in batch]
 
@@ -232,27 +227,21 @@ class ScModel(nn.Module):
 
         encoder1, encoder2, gnn, decoder1, decoder2 = self.models
 
-        # Process RNA data
         mu1, log_sigma1, kl_theta1 = encoder1(RNA_tensor_normalized)
         z1 = self.reparameterize(mu1, log_sigma1)
         theta1 = F.softmax(z1, dim=-1)
 
-        # Process ATAC data
         mu2, log_sigma2, kl_theta2 = encoder2(ATAC_tensor_normalized)
         z2 = self.reparameterize(mu2, log_sigma2)
         theta2 = F.softmax(z2, dim=-1)
-
-        # Initialize variables
         rho, eta = None, None
         edge_recon_loss = torch.tensor(0.0, device=self.device)
         emb = None
 
-        # GNN processing if enabled
-        if self.use_gnn:
-            edge_index = self.get_edge_index(train_loader)
+        if self.use_gnn and self.edge_index is not None:
+            edge_index = self.edge_index  # Use the stored edge index
 
             if self.use_xtrimo:
-                # Use learned embeddings
                 gene_embeddings = self.gene_embedding(RNA_tensor_normalized)
                 atac_embeddings = self.atac_embedding(ATAC_tensor_normalized)
                 fm = torch.cat((
@@ -264,20 +253,16 @@ class ScModel(nn.Module):
                 specific_fm = self.batch_to_emb(specific_fm).to(self.device)
                 fm = specific_fm * self.node2vec.to(self.device)
 
-            # Pass through GNN
             emb = gnn(fm, edge_index)
             rho, eta = self.split_tensor(emb, RNA_tensor_gnn.shape[1])
 
-            # Compute graph reconstruction loss if enabled
             if self.use_graph_recon:
                 edge_recon_loss = self.compute_graph_reconstruction_loss(emb, edge_index)
                 edge_recon_loss = edge_recon_loss * self.graph_recon_weight
 
-        # Decode - pass None for matrix if GNN is disabled
         pred_RNA_tensor = decoder1(theta1, rho if self.use_gnn else None)
         pred_ATAC_tensor = decoder2(theta2, eta if self.use_gnn else None)
 
-        # Calculate losses
         recon_loss1 = -(pred_RNA_tensor * RNA_tensor).sum(-1)
         recon_loss2 = -(pred_ATAC_tensor * ATAC_tensor).sum(-1)
         recon_loss = (recon_loss1 + recon_loss2).mean()
@@ -285,72 +270,6 @@ class ScModel(nn.Module):
 
         return recon_loss, kl_loss, edge_recon_loss, emb
 
-    def train_epoch(self, data_loader: ScDataLoader, epochs: int = 20, finetune: bool = False):
-        """Train the model for specified number of epochs."""
-        train_loader = data_loader.train_loader
-        test_loader = None if finetune else data_loader.test_loader
-
-        for epoch in range(epochs):
-            self.epoch = epoch + 1
-            print(f"Epoch {epoch + 1}/{epochs}")
-
-            # Calculate weights for different loss components
-            recon_loss_weight = self.calc_weight(epoch, epochs, 0, 2 / 4, 0.6, 8, True)
-            kl_weight = self.calc_weight(epoch, epochs, 0, 2 / 4, 0, 1e-2, False)
-            edge_loss_weight = self.calc_weight(epoch, epochs, 0, 2 / 4, 0, 10, False)
-
-            losses = self.train_single_epoch(train_loader, recon_loss_weight,
-                                             kl_weight, edge_loss_weight)
-
-            # Print training information
-            print(f"recon_loss_weight: {recon_loss_weight}, "
-                  f"kl_weight: {kl_weight}, "
-                  f"edge_loss_weight: {edge_loss_weight}")
-            print(f"Avg Recon Loss: {losses['recon_loss']:.4f}, "
-                  f"Avg KL Loss: {losses['kl_loss']:.4f}, "
-                  f"Avg edge_recon Loss: {losses['edge_recon_loss']:.4f}, "
-                  f"Avg Total Loss: {losses['total_loss']:.4f}")
-
-            if not finetune:
-                self.evaluate_and_save(data_loader)
-
-            gc.collect()
-
-        print(f"Best Train ARI: {self.best_train_ari:.4f}, "
-              f"Best Test ARI: {self.best_test_ari:.4f}")
-
-    def train_single_epoch(self, train_loader: torch.utils.data.DataLoader,
-                           recon_loss_weight: float, kl_weight: float,
-                           edge_loss_weight: float) -> Dict[str, float]:
-        """Train for a single epoch and return losses."""
-        total_loss = 0
-        total_recon_loss = 0
-        total_kl_loss = 0
-        total_edge_recon_loss = 0
-
-        for batch in tqdm(train_loader, desc="Training"):
-            with autocast():
-                self.optimizer.zero_grad()
-                recon_loss, kl_loss, edge_recon_loss, emb = self.forward(batch, train_loader)
-                loss = (recon_loss_weight * recon_loss +
-                        kl_loss * kl_weight +
-                        edge_loss_weight * edge_recon_loss)
-
-                self.loss_scaler.scale(loss).backward()
-                self.loss_scaler.step(self.optimizer)
-                self.loss_scaler.update()
-
-            total_recon_loss += recon_loss.item()
-            total_kl_loss += kl_loss.item()
-            total_edge_recon_loss += edge_recon_loss.item()
-            total_loss += loss.item()
-
-        return {
-            'recon_loss': total_recon_loss / len(train_loader),
-            'kl_loss': total_kl_loss / len(train_loader),
-            'edge_recon_loss': total_edge_recon_loss / len(train_loader),
-            'total_loss': total_loss / len(train_loader)
-        }
 
     def evaluate_and_save(self, data_loader: ScDataLoader):
         """Evaluate model performance and save best model."""
@@ -376,48 +295,6 @@ class ScModel(nn.Module):
         if train_ari >= self.best_train_ari:
             self.best_train_ari = train_ari
 
-    @staticmethod
-    def calc_weight(epoch: int, n_epochs: int, cutoff_ratio: float,
-                    warmup_ratio: float, min_weight: float, max_weight: float,
-                    reverse: bool = False) -> float:
-        """Calculate weight for loss components based on training progress."""
-        if epoch < n_epochs * cutoff_ratio:
-            return 0.0
-
-        fully_warmup_epoch = n_epochs * warmup_ratio
-        if warmup_ratio:
-            if reverse:
-                if epoch < fully_warmup_epoch:
-                    return 1.0
-                weight_progress = min(1.0, (epoch - fully_warmup_epoch) /
-                                      (n_epochs - fully_warmup_epoch))
-                weight = max_weight - weight_progress * (max_weight - min_weight)
-            else:
-                weight_progress = min(1.0, epoch / fully_warmup_epoch)
-                weight = min_weight + weight_progress * (max_weight - min_weight)
-            return max(min_weight, min(max_weight, weight))
-        return max_weight
-
-    def get_edge_index(self, train_loader: torch.utils.data.DataLoader,
-                       edge_num: Optional[int] = None) -> torch.Tensor:
-        """Get edge indices for GNN."""
-        edge_index = train_loader.dataset.dataset.edge_index.to(self.device)
-        if edge_num:
-            selected_edge_index = torch.randperm(edge_index.size(1))[:edge_num]
-            edge_index = edge_index[:, selected_edge_index]
-        return edge_index
-
-    def get_fm(self, train_loader: torch.utils.data.DataLoader,
-               atac_tensor: torch.Tensor, gene_embeddings: torch.Tensor,
-               use_rand: bool = False) -> torch.Tensor:
-        """Get feature matrix for GNN using gene embeddings."""
-        if use_rand:
-            return train_loader.dataset.dataset.fm.to(self.device)
-
-        # Use gene embeddings for RNA part of the feature matrix
-        fm = torch.cat((gene_embeddings, atac_tensor.T), dim=0)
-
-        return fm
 
     @staticmethod
     def split_tensor(tensor: torch.Tensor, num_rows: int) -> Tuple[torch.Tensor, torch.Tensor]:

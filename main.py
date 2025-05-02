@@ -5,6 +5,8 @@ import numpy as np
 import random
 import matplotlib.pyplot as plt
 from datetime import datetime
+import pickle
+import scipy.sparse as sp
 
 from sc_model import ScModel
 from scDataLoader import ScDataLoader, set_seed
@@ -22,6 +24,10 @@ def parse_args():
                         help='Directory containing the data')
     parser.add_argument('--result_dir', type=str, default='./results',
                         help='Directory to save results')
+    parser.add_argument('--adj_matrix_path', type=str, default=None,
+                        help='Path to adjacency matrix file (.pkl or .npy)')
+    parser.add_argument('--node2vec_embedding_path', type=str, default=None,
+                        help='Path to node2vec embedding file (.pt or .npy)')
 
     # Model parameters
     parser.add_argument('--emb_size', type=int, default=128,
@@ -97,6 +103,46 @@ def save_config(args, directories):
             f.write(f"{arg}: {getattr(args, arg)}\n")
 
 
+def load_adj_matrix_to_edge_index(path):
+    """Load adjacency matrix from file and convert to edge index"""
+    if path.endswith('.pkl'):
+        with open(path, 'rb') as f:
+            adj_matrix = pickle.load(f)
+    elif path.endswith('.npy'):
+        adj_matrix = np.load(path)
+    else:
+        raise ValueError(f"Unsupported adjacency matrix file format: {path}")
+
+    # Convert to edge index
+    if sp.issparse(adj_matrix):
+        # If the matrix is sparse, convert to COO format
+        adj_coo = adj_matrix.tocoo()
+        row = adj_coo.row.astype(np.int64)
+        col = adj_coo.col.astype(np.int64)
+        edge_index = torch.tensor([row, col], dtype=torch.long)
+    else:
+        # If the matrix is dense (numpy array or torch tensor)
+        if isinstance(adj_matrix, np.ndarray):
+            adj_matrix = torch.from_numpy(adj_matrix)
+
+        # Get indices where the adjacency matrix is non-zero
+        indices = torch.nonzero(adj_matrix).t()
+        edge_index = indices
+
+    return edge_index
+
+
+def load_node2vec_embedding(path):
+    """Load node2vec embedding from file"""
+    if path.endswith('.pt'):
+        node2vec_embedding = torch.load(path)
+    elif path.endswith('.npy'):
+        node2vec_embedding = torch.from_numpy(np.load(path))
+    else:
+        raise ValueError(f"Unsupported node2vec embedding file format: {path}")
+    return node2vec_embedding
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -105,6 +151,17 @@ def main():
     print(f"Using device: {device}")
     directories = setup_directories(args)
     save_config(args, directories)
+
+    # Load the adjacency matrix and node2vec embedding if paths are provided
+    edge_index = None
+    if args.adj_matrix_path:
+        edge_index = load_adj_matrix_to_edge_index(args.adj_matrix_path).to(device)
+        print(f"Loaded edge index with shape: {edge_index.shape}")
+
+    node2vec = None
+    if args.node2vec_embedding_path:
+        node2vec = load_node2vec_embedding(args.node2vec_embedding_path).to(device)
+        print(f"Loaded node2vec embedding with shape: {node2vec.shape}")
 
     data_loader = ScDataLoader(
         data_dir=args.data_dir,
@@ -116,7 +173,6 @@ def main():
     num_of_peak = data_loader.get_peak_num()
     num_of_gene_gnn = data_loader.get_gene_num_gnn()
     num_of_peak_gnn = data_loader.get_peak_num_gnn()
-    node2vec = data_loader.get_node2vec_embedding()
 
     print(f"Data loaded with {num_of_gene} genes and {num_of_peak} peaks")
 
@@ -136,6 +192,7 @@ def main():
         graph_recon_weight=args.graph_recon_weight,
         pos_weight=args.pos_weight,
         node2vec=node2vec,
+        edge_index=edge_index,
         use_gnn=args.use_gnn,
         use_xtrimo=args.use_xtrimo,
         shared_decoder=args.shared_decoder

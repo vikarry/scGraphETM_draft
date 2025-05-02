@@ -165,7 +165,7 @@ def evaluate_grn(model: ScModel, rna_adata_gnn: ad.AnnData, atac_adata_gnn: ad.A
     TF_index = rna_adata_gnn.var_names.get_loc(TF_name)
     TF_row = grn_matrix[TF_index]
     ones_indices = TF_row.indices[TF_row.data == 1]
-    adjusted_indices = ones_indices - 4151
+    adjusted_indices = ones_indices - rna_adata_gnn.shape[1]  # Adjust for RNA indices
 
     selected_peaks = atac_adata_gnn.var_names[adjusted_indices]
 
@@ -265,7 +265,7 @@ def _compute_mlp_scores(model: ScModel, tf_row: torch.Tensor,
     mlp_model.train_model(pairs_train, labels_train, epochs=500, lr=0.0001)
     accuracy, fpr, tpr, roc_auc, precision, recall, pr_auc, scores = mlp_model.evaluate_model(pairs_test, labels_test)
 
-    return scores, labels_test
+    return scores, labels_test.cpu().numpy()
 
 
 def _compute_and_plot_metrics(scores: np.ndarray, labels: np.ndarray,
@@ -296,7 +296,7 @@ def _plot_roc(fpr: np.ndarray, tpr: np.ndarray, roc_auc: float,
     plt.ylabel('True Positive Rate')
     plt.title('Receiver Operating Characteristic')
     plt.legend(loc="lower right")
-    plt.savefig(f'{path}{method}_{tf_name}_{cell_type}_roc.png')
+    plt.savefig(f'{path}/{method}_{tf_name}_{cell_type}_roc.png')
     plt.close()
 
 
@@ -313,5 +313,5 @@ def _plot_precision_recall(recall: np.ndarray, precision: np.ndarray,
     plt.xlim([0.0, 1.0])
     plt.title('Precision-Recall Curve')
     plt.legend(loc="lower left")
-    plt.savefig(f'{path}{method}_{tf_name}_{cell_type}_prc.png')
+    plt.savefig(f'{path}/{method}_{tf_name}_{cell_type}_prc.png')
     plt.close()
