@@ -36,7 +36,7 @@ Calculates the overlap percentage between available CisTarget region and peaks. 
 - **GRN Matrix**: A merged representation of TG-RE and TF-RE matrices for the overall gene regulatory network.
 
 ## Project Structure
-
+```
 ├── data/
 │   ├── processed/
 │   │   ├── cll_atac.h5ad
@@ -71,3 +71,4 @@ Calculates the overlap percentage between available CisTarget region and peaks. 
 ├── tester.py                        # Testing functions
 ├── train.py                         # Training functions
 └── train_node2vec.py                # Script to train node2vec embeddings
+```
