@@ -33,7 +33,7 @@ def filter_and_find_degs(rna_files_dir, output_dir='./results/degs', min_cells=1
     os.makedirs(output_dir, exist_ok=True)
 
     # Find all h5ad files in the directory
-    h5ad_files = [f for f in os.listdir(rna_files_dir) if f.endswith('_rna.h5ad')]
+    h5ad_files = [f for f in os.listdir(rna_files_dir) if f.endswith('_rna_matched.h5ad')]
 
     if not h5ad_files:
         print(f"No RNA h5ad files found in {rna_files_dir}")
@@ -78,7 +78,6 @@ def filter_and_find_degs(rna_files_dir, output_dir='./results/degs', min_cells=1
         adata.obs['sample_id'] = c_file.split('_')[0]  # Extract GSM ID
         adatas.append(adata)
 
-    # Concatenate all samples
     if len(adatas) > 1:
         adata = adatas[0].concatenate(adatas[1:], join='outer')
     else:
@@ -89,74 +88,59 @@ def filter_and_find_degs(rna_files_dir, output_dir='./results/degs', min_cells=1
     # Basic QC and filtering
     print("Performing QC and filtering...")
 
-    # Calculate QC metrics
-    sc.pp.calculate_qc_metrics(adata, inplace=True)
+    # # Calculate QC metrics
+    # sc.pp.calculate_qc_metrics(adata, inplace=True)
+    #
+    # # Plot QC metrics
+    # fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+    #
+    # sns.histplot(adata.obs['n_genes_by_counts'], kde=False, ax=axs[0, 0])
+    # axs[0, 0].set_title('Genes per Cell')
+    # axs[0, 0].axvline(min_genes, color='red')
+    #
+    # sns.histplot(adata.obs['total_counts'], kde=False, ax=axs[0, 1])
+    # axs[0, 1].set_title('UMI Counts per Cell')
+    #
+    # sns.histplot(adata.obs['pct_counts_mt'] if 'pct_counts_mt' in adata.obs else [0] * adata.shape[0],
+    #              kde=False, ax=axs[0, 2])
+    # axs[0, 2].set_title('Percent Mitochondrial')
+    #
+    # sc.pl.violin(adata, 'n_genes_by_counts', groupby='sample_type', ax=axs[1, 0], show=False)
+    # sc.pl.violin(adata, 'total_counts', groupby='sample_type', ax=axs[1, 1], show=False)
+    # sc.pl.violin(adata, 'pct_counts_mt' if 'pct_counts_mt' in adata.obs else 'n_genes_by_counts',
+    #              groupby='sample_type', ax=axs[1, 2], show=False)
+    #
+    # plt.tight_layout()
+    # plt.savefig(os.path.join(output_dir, 'qc_metrics.png'))
+    # plt.close()
 
-    # Plot QC metrics
-    fig, axs = plt.subplots(2, 3, figsize=(15, 10))
-
-    sns.histplot(adata.obs['n_genes_by_counts'], kde=False, ax=axs[0, 0])
-    axs[0, 0].set_title('Genes per Cell')
-    axs[0, 0].axvline(min_genes, color='red')
-
-    sns.histplot(adata.obs['total_counts'], kde=False, ax=axs[0, 1])
-    axs[0, 1].set_title('UMI Counts per Cell')
-
-    sns.histplot(adata.obs['pct_counts_mt'] if 'pct_counts_mt' in adata.obs else [0] * adata.shape[0],
-                 kde=False, ax=axs[0, 2])
-    axs[0, 2].set_title('Percent Mitochondrial')
-
-    sc.pl.violin(adata, 'n_genes_by_counts', groupby='sample_type', ax=axs[1, 0], show=False)
-    sc.pl.violin(adata, 'total_counts', groupby='sample_type', ax=axs[1, 1], show=False)
-    sc.pl.violin(adata, 'pct_counts_mt' if 'pct_counts_mt' in adata.obs else 'n_genes_by_counts',
-                 groupby='sample_type', ax=axs[1, 2], show=False)
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'qc_metrics.png'))
-    plt.close()
-
-    # Filter cells and genes
     print(f"Before filtering: {adata.shape[0]} cells, {adata.shape[1]} genes")
 
-    sc.pp.filter_cells(adata, min_genes=min_genes)
-    sc.pp.filter_genes(adata, min_cells=min_cells)
-
-    # Filter mitochondrial genes if they're annotated
-    if 'mt' in adata.var_names[0]:
-        adata.var['mt'] = adata.var_names.str.startswith('MT-')
-        sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, inplace=True)
-        adata = adata[adata.obs.pct_counts_mt < 20, :]
-
+    # sc.pp.filter_cells(adata, min_genes=min_genes)
+    # sc.pp.filter_genes(adata, min_cells=min_cells)
     print(f"After filtering: {adata.shape[0]} cells, {adata.shape[1]} genes")
 
-    # Create a copy of the filtered but unnormalized data
     unnormalized_adata = adata.copy()
 
-    # Normalize data for DEG analysis
     print("Normalizing data for DEG analysis...")
     sc.pp.normalize_total(adata, target_sum=1e4)
     sc.pp.log1p(adata)
 
-    # Identify highly variable genes
     print(f"Identifying top {n_top_genes} variable genes...")
     sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes)
 
-    # Plot highly variable genes
     plt.figure(figsize=(10, 7))
     sc.pl.highly_variable_genes(adata, show=False)
     plt.savefig(os.path.join(output_dir, 'highly_variable_genes.png'))
     plt.close()
 
-    # Find DEGs using Wilcoxon rank-sum test
     print("Computing differential expression between healthy and CLL...")
     sc.tl.rank_genes_groups(adata, groupby='sample_type', method='wilcoxon')
 
-    # Get results and save to CSV
     print("Saving DEG results...")
     result = adata.uns['rank_genes_groups']
     groups = result['names'].dtype.names
 
-    # Create a DataFrame with all DEG results
     deg_data = []
     for group in groups:
         genes = result['names'][group]
@@ -269,7 +253,7 @@ def filter_and_find_degs(rna_files_dir, output_dir='./results/degs', min_cells=1
             deg_adata = orig_adata[:, mask].copy()
 
             # Name the output file
-            output_file = os.path.join(output_dir, file_name.replace('.h5ad', '_degs.h5ad'))
+            output_file = os.path.join(output_dir, file_name.replace('_matched.h5ad', '_matched_degs.h5ad'))
 
             # Save the DEG-only data (unnormalized)
             deg_adata.write_h5ad(output_file)
